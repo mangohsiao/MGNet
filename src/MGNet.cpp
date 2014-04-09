@@ -19,6 +19,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <signal.h>
+#include <errno.h>
 #include <arpa/inet.h>
 
 namespace mango {
@@ -28,9 +29,9 @@ MGNet* MGNet::m_MGNet = NULL;
 NodeList *m_list = NULL;
 
 //global var
-pthread_t th_read = -1;
-pthread_t th_write = -1;
-pthread_t th_heart = -1;
+pthread_t th_read = 0;
+pthread_t th_write = 0;
+pthread_t th_heart = 0;
 pthread_cond_t cond_w = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t mtx_w = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mtx_h_count = PTHREAD_MUTEX_INITIALIZER;
@@ -39,7 +40,8 @@ bool isConnect = false;
 pthread_mutex_t mtx_readyRead = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond_readyRead = PTHREAD_COND_INITIALIZER;
 
-StateCallback cb_func = NULL;
+StateCallback MGNet::st_cb_func = NULL;
+ReceiveCallback MGNet::rc_cb_func = NULL;
 
 // thread handler
 void* thread_write_run(void* arg);
@@ -49,7 +51,11 @@ void* thread_heart_run(void* arg);
 void mg_signal_handle(int sig);
 
 
+int test_thread(pthread_t tid);
 int start_read_thread(void* mObj);
+int start_write_thread(void* mObj);
+int start_heart_thread(void* mObj);
+void cleanup_read_thread(void *);
 
 MGNet::MGNet():sock_fd(0),heart_check(0),heart_break_str(DEFAULT_HEART_STR){
 		listen_port = 0;
@@ -70,10 +76,6 @@ MGNet::~MGNet() {
 	m_list = NULL;
 }
 
-void MGNet::setStateCallback(StateCallback callback_func) {
-	cb_func = callback_func;
-}
-
 void MGNet::init() {
 	if(NULL == m_list)
 		m_list = new NodeList();
@@ -86,17 +88,17 @@ void MGNet::start() {
 void MGNet::stop() {
 	printf("%s\n", "stop...");
 	void* status;
-	if(th_read != (unsigned long)-1){
+	if(th_read != (unsigned long)0){
 		printf("%s = %lu\n", "kill...th_read", th_read);
 		pthread_kill(th_read, SIGUSR2);
 		pthread_join(th_read,&status);
 	}
-	if(th_write != (unsigned long)-1){
+	if(th_write != (unsigned long)0){
 		printf("%s = %lu\n", "kill...th_write", th_write);
 		pthread_kill(th_write, SIGUSR2);
 		pthread_join(th_write,&status);
 	}
-	if(th_write != (unsigned long)-1){
+	if(th_write != (unsigned long)0){
 		printf("%s = %lu\n", "kill...th_heart", th_heart);
 		pthread_kill(th_heart, SIGUSR2);
 		pthread_join(th_heart,&status);
@@ -110,7 +112,7 @@ void MGNet::send(string msg) {
 	if(NULL != m_list){
 		m_list->push_back(msg);
 	}else{
-		call_callback_func(1,1);
+		call_callback_stat(1,1);
 	}
 	pthread_cond_signal(&cond_w);
 	pthread_mutex_unlock(&mtx_w);
@@ -146,21 +148,21 @@ void MGNet::initialNet() {
 	}
 
 	/* read thread */
-	rtvl = pthread_create(&th_read,NULL,thread_read_run,this);
+	rtvl = start_read_thread(this);
 	if(rtvl < 0){
 		printf("thread 01 error.");
 		return;
 	}
 
 	/* write thread */
-	rtvl = pthread_create(&th_write,NULL,thread_write_run,this);
+	rtvl = start_write_thread(this);
 	if(rtvl < 0){
 		printf("thread 02 error.");
 		return;
 	}
 
 	/* heart break */
-	rtvl = pthread_create(&th_heart,NULL,thread_heart_run,this);
+	rtvl = start_heart_thread(this);
 	if(rtvl < 0){
 		printf("thread 03 error.");
 		return;
@@ -173,6 +175,14 @@ int start_read_thread(void* mObj){
 	/* read thread */
 	return pthread_create(&th_read,NULL,thread_read_run,mObj);
 }
+int start_write_thread(void* mObj){
+	/* read thread */
+	return pthread_create(&th_write,NULL,thread_write_run,mObj);
+}
+int start_heart_thread(void* mObj){
+	/* read thread */
+	return pthread_create(&th_heart,NULL,thread_heart_run,mObj);
+}
 
 void MGNet::setRemoteIp(string remote_ip) {
 	strcpy(this->remote_ip, remote_ip.c_str());
@@ -180,12 +190,6 @@ void MGNet::setRemoteIp(string remote_ip) {
 
 void MGNet::setRemotePort(int remote_port) {
 	this->remote_port = remote_port;
-}
-
-void MGNet::call_callback_func(int state, int code) {
-	if(NULL != cb_func){
-		cb_func(state,code);
-	}
 }
 
 void* thread_write_run(void* arg) {
@@ -219,6 +223,7 @@ void* thread_write_run(void* arg) {
 				m_list->push_front(p);
 				/* set disConnect? */
 				//TODO callback
+				arg_ptr->call_callback_stat(99,98);
 			}
 		}
 		pthread_mutex_unlock(&mtx_w);
@@ -227,10 +232,16 @@ void* thread_write_run(void* arg) {
 	return NULL;
 }
 
+void cleanup_read_thread(void *){
+	printf("cleaning read thread.\n");
+	pthread_mutex_unlock(&mtx_readyRead);
+	return;
+}
+
 void* thread_read_run(void* arg) {
 	printf("read_func start...\n");
 	MGNet *arg_ptr = (MGNet*)arg;
-
+	pthread_cleanup_push(cleanup_read_thread,NULL);
 	while(true){
 		pthread_mutex_lock(&mtx_readyRead);
 		while(!isConnect){
@@ -238,22 +249,23 @@ void* thread_read_run(void* arg) {
 		}
 		pthread_mutex_unlock(&mtx_readyRead);
 
-//		int n,socket_fd;
 		int n;
 		char buf[READ_BUF];
-//		socket_fd = arg_ptr->sock_fd;
 		printf("in read. sock = %d\n", arg_ptr->sock_fd);
 		while((n = recv(arg_ptr->sock_fd, buf, 4096, 0)) > 0){
-			write(STDOUT_FILENO, buf, n);
+			/* receiving */
+			arg_ptr->call_callback_recv(buf,n);
+//			write(STDOUT_FILENO, buf, n);
 		}
 		if(n < 0){
 			printf("recv error.\n");
-			arg_ptr->call_callback_func(RECEIVE_ERROR, THREAD_RECEIVE_STOP);
+			arg_ptr->call_callback_stat(RECEIVE_ERROR, THREAD_RECEIVE_STOP);
 			pthread_mutex_lock(&mtx_readyRead);
 			isConnect = false;
 			pthread_mutex_unlock(&mtx_readyRead);
 		}
 	}
+	pthread_cleanup_pop(0);
 	return NULL;
 }
 
@@ -275,7 +287,6 @@ void* thread_heart_run(void* arg) {
 		pthread_mutex_lock(&mtx_readyRead);
 		pthread_cond_wait(&cond_readyRead,&mtx_readyRead);
 		pthread_mutex_unlock(&mtx_readyRead);
-		printf("heart thread over mutex.\n");
 	}
 	return NULL;
 }
@@ -294,16 +305,55 @@ int MGNet::reconnectNet() {
 	int rtvl;
 	close(sock_fd);
 	sock_fd = -1;
-	rtvl = pthread_kill(th_read,SIGUSR2);
-	if(rtvl < 0){
-		printf("stop read thread failed.\n");
-	}else{
-		void *status;
-		pthread_join(th_read,&status);
+	//set isConnect;
+	pthread_mutex_lock(&mtx_readyRead);
+	isConnect = false;
+	pthread_mutex_unlock(&mtx_readyRead);
+
+	if(0 == test_thread(th_read)){
+		rtvl = pthread_kill(th_read,SIGUSR2);
+		printf("kill ing ....\n");
+		if(rtvl < 0){
+			printf("stop read thread failed.\n");
+		}else{
+			void *status;
+			pthread_join(th_read,&status);
+			th_read = 0;
+			printf("stop read thread ok.\n");
+		}
 	}
-	start_read_thread(this);
-	connectNet();
+	rtvl = connectNet();
+	printf("connectNet RTVL = %d\n", rtvl);
+	if(rtvl != 0){
+		return rtvl;
+	}
+	rtvl = start_read_thread(this);
+	printf("start read thread RTVL = %d\n", rtvl);
+	if(0 != test_thread(th_write)){
+		//TODO callbcak
+		printf("th_write is stop.");
+		start_write_thread(this);
+	}
+	if(0 != test_thread(th_heart)){
+		//TODO callbcak
+		printf("th_heart is stop.");
+		start_heart_thread(this);
+	}
 	return 0;
+}
+
+int test_thread(pthread_t tid){
+	if(tid == 0){
+		return -3;
+	}
+	int rtvl = pthread_kill(tid,0);
+	if(rtvl == ESRCH){
+		return -1;
+	}else if(rtvl == EINVAL){
+		return -2;
+	}else{
+		return 0;
+	}
 }
 
 int MGNet::disconnectNet() {
@@ -372,6 +422,26 @@ int MGNet::connectNet() {
 	pthread_mutex_unlock(&mtx_readyRead);
 
 	return 0;
+}
+
+inline void MGNet::call_callback_stat(int state, int code) {
+	if(NULL != st_cb_func){
+		st_cb_func(state,code);
+	}
+}
+
+inline void MGNet::call_callback_recv(char* buf, int len) {
+	if(NULL != rc_cb_func){
+		rc_cb_func(buf,len);
+	}
+}
+
+void MGNet::set_stat_callback(StateCallback st_callback_func) {
+	st_cb_func = st_callback_func;
+}
+
+void MGNet::set_recv_callback(ReceiveCallback rc_callback_func) {
+	rc_cb_func = rc_callback_func;
 }
 
 } /* namespace mango */

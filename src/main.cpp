@@ -7,19 +7,25 @@
 //============================================================================
 #include "MGNet.h"
 #include <stdio.h>
+#include <unistd.h>
 #include <string.h>
-#include <iostream>
+#include <stdlib.h>
 
+#include <iostream>
 #include <string>
 using namespace std;
 using namespace mango;
 
 int m_status = 0;
 
-int callback(int status, int code){
+int stat_callback(int status, int code){
 	m_status = status;
 	cout << "trigger : " << status << endl;
 	return status;
+}
+
+void recv_callback(char *buf, int len){
+	write(STDOUT_FILENO, buf, len);
 }
 
 int main() {
@@ -29,6 +35,8 @@ int main() {
 	mNet->setRemoteIp("125.216.243.235");
 	mNet->setRemotePort(8002);
 	mNet->set_heart_break_str("#b\n");
+	mNet->set_recv_callback(recv_callback);
+	mNet->set_stat_callback(stat_callback);
 	mNet->start();
 
 

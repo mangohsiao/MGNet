@@ -14,6 +14,7 @@
 using namespace std;
 
 typedef int (*StateCallback)(int state, int code);
+typedef void (*ReceiveCallback)(char *buf, int len);
 
 #define WRITE_BUF 4096
 #define READ_BUF 4096
@@ -36,14 +37,12 @@ public:
 	void set_heart_break_str(string s);
 	string get_heart_break_str();
 
-	void setStateCallback(StateCallback callback_func);
 	void init();
 	void start();
 	void stop();
 	int reconnectNet();
 	int disconnectNet();
 	void send(string msg);
-	void call_callback_func(int state, int code);
 
 private:
 	char remote_ip[48];
@@ -56,15 +55,21 @@ private:
 	int connectNet();
 
 public:
+	static StateCallback st_cb_func;
+	void call_callback_stat(int state, int code);
+	static ReceiveCallback rc_cb_func;
+	void call_callback_recv(char *buf, int len);
+	void set_stat_callback(StateCallback st_cb_func);
+	void set_recv_callback(ReceiveCallback rc_cb_func);
 
 	static MGNet* ins(){
 		if(NULL == MGNet::m_MGNet){
-			MGNet::m_MGNet = new MGNet();
+			m_MGNet = new MGNet();
 		}
-		return MGNet::m_MGNet;
+		return m_MGNet;
 	}
 	static void release(){
-		MGNet::m_MGNet->~MGNet();
+		m_MGNet->~MGNet();
 	}
 };
 } /* namespace mango */
