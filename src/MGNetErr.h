@@ -10,6 +10,7 @@
 
 /* state */
 #define RECEIVE_ERROR 400
+//#define RECEIVE_ERROR 400
 
 /* code */
 #define THREAD_RECEIVE_STOP 401

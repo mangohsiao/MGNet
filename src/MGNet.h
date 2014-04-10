@@ -18,7 +18,7 @@ typedef void (*ReceiveCallback)(char *buf, int len);
 
 #define WRITE_BUF 4096
 #define READ_BUF 4096
-#define HEART_TIME_INTERVAL 12
+#define HEART_TIME_INTERVAL 24
 
 #define DEFAULT_HEART_STR "#h\n"
 
@@ -52,7 +52,6 @@ private:
 	MGNet();
 	static MGNet* m_MGNet;
 	void initialNet();
-	int connectNet();
 
 public:
 	static StateCallback st_cb_func;
@@ -61,6 +60,9 @@ public:
 	void call_callback_recv(char *buf, int len);
 	void set_stat_callback(StateCallback st_cb_func);
 	void set_recv_callback(ReceiveCallback rc_cb_func);
+	int WriteSelect(int fd, double& timeout_sec);
+	void ActReadThreadCmd(int cmd);
+	int connectNet();
 
 	static MGNet* ins(){
 		if(NULL == MGNet::m_MGNet){

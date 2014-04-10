@@ -11,6 +11,7 @@
 #include <deque>
 #include <iostream>
 
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -21,12 +22,16 @@
 #include <signal.h>
 #include <errno.h>
 #include <arpa/inet.h>
+#include <netinet/tcp.h>
+#include <fcntl.h>
 
 namespace mango {
 
 MGNet* MGNet::m_MGNet = NULL;
 
 NodeList *m_list = NULL;
+
+int heart_count = 0;
 
 //global var
 pthread_t th_read = 0;
@@ -40,6 +45,11 @@ bool isConnect = false;
 pthread_mutex_t mtx_readyRead = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond_readyRead = PTHREAD_COND_INITIALIZER;
 
+int read_thread_cmd = -1;
+pthread_mutex_t mtx_read_thread = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond_read_thread = PTHREAD_COND_INITIALIZER;
+int restore_flags;
+
 StateCallback MGNet::st_cb_func = NULL;
 ReceiveCallback MGNet::rc_cb_func = NULL;
 
@@ -50,6 +60,8 @@ void* thread_heart_run(void* arg);
 
 void mg_signal_handle(int sig);
 
+int SetRestoreBlock(int fd);
+int SetNonBlock(int fd);
 
 int test_thread(pthread_t tid);
 int start_read_thread(void* mObj);
@@ -57,7 +69,7 @@ int start_write_thread(void* mObj);
 int start_heart_thread(void* mObj);
 void cleanup_read_thread(void *);
 
-MGNet::MGNet():sock_fd(0),heart_check(0),heart_break_str(DEFAULT_HEART_STR){
+MGNet::MGNet():sock_fd(-1),heart_check(0),heart_break_str(DEFAULT_HEART_STR){
 		listen_port = 0;
 		strcpy(remote_ip, "125.216.243.243");
 		remote_port = 8993;
@@ -83,6 +95,7 @@ void MGNet::init() {
 
 void MGNet::start() {
 	initialNet();
+	ActReadThreadCmd(1);
 }
 
 void MGNet::stop() {
@@ -105,6 +118,7 @@ void MGNet::stop() {
 	}
 	close(sock_fd);
 	printf("%s\n", "stop...ok");
+	call_callback_stat(1992,0);
 }
 
 void MGNet::send(string msg) {
@@ -131,6 +145,7 @@ void MGNet::initialNet() {
 		return;
 	}
 
+
 /*	struct addrinfo *ailist;
 	struct addrinfo hint;
 	memset(&hint,0,sizeof(hint));
@@ -141,11 +156,13 @@ void MGNet::initialNet() {
 		return;
 	}*/
 
-	rtvl = connectNet();
+/*	rtvl = connectNet();
 	if(rtvl < 0){
 		printf("connect() < 0\n");
 		return;
-	}
+	}*/
+
+	isConnect = false;
 
 	/* read thread */
 	rtvl = start_read_thread(this);
@@ -195,6 +212,7 @@ void MGNet::setRemotePort(int remote_port) {
 void* thread_write_run(void* arg) {
 	printf("write_func start...\n");
 	MGNet *arg_ptr = (MGNet*)arg;
+	int _ret;
 
 	char buf[WRITE_BUF];
 	while(true){
@@ -210,6 +228,10 @@ void* thread_write_run(void* arg) {
 		while(NULL == (p = m_list->pop_front())){
 			pthread_cond_wait(&cond_w,&mtx_w);
 		}
+
+//		double timeout = 3.0;
+//		_ret = arg_ptr->WriteSelect(arg_ptr->sock_fd,timeout);
+//		printf("select _ret:%d", _ret);
 
 		if(p != NULL){
 			len = p->str.length();
@@ -233,7 +255,7 @@ void* thread_write_run(void* arg) {
 }
 
 void cleanup_read_thread(void *){
-	printf("cleaning read thread.\n");
+//	printf("cleaning read thread.\n");
 	pthread_mutex_unlock(&mtx_readyRead);
 	return;
 }
@@ -242,29 +264,66 @@ void* thread_read_run(void* arg) {
 	printf("read_func start...\n");
 	MGNet *arg_ptr = (MGNet*)arg;
 	pthread_cleanup_push(cleanup_read_thread,NULL);
+	int _cmd,_ret = -1;
 	while(true){
-		pthread_mutex_lock(&mtx_readyRead);
-		while(!isConnect){
-			pthread_cond_wait(&cond_readyRead,&mtx_readyRead);
+		pthread_mutex_lock(&mtx_read_thread);
+		while(read_thread_cmd < 0){
+			pthread_cond_wait(&cond_read_thread,&mtx_read_thread);
 		}
+		_cmd = read_thread_cmd;
+		read_thread_cmd = -1;
+		pthread_mutex_unlock(&mtx_read_thread);
+
+		if(_cmd < 0){
+			continue;
+		}
+
+		//get new _cmd;
+		switch(_cmd){
+		case 0:
+			//test current sock_fd;
+//			_ret =
+			break;
+		case 1:
+			//close current sock_fd,and get new one, to connect;
+			if(arg_ptr->sock_fd > 0){
+				close(arg_ptr->sock_fd);
+				arg_ptr->sock_fd = -1;
+			}
+			_ret = arg_ptr->connectNet();
+			break;
+		}
+
+		if(_ret < 0){
+			arg_ptr->call_callback_stat(1994,1994);
+			continue;
+		}
+
+		/* connect ok */
+		//set isConnect true, notify write and heart thread.
+
+		pthread_mutex_lock(&mtx_readyRead);
+		isConnect = true;
+		pthread_cond_broadcast(&cond_readyRead);
 		pthread_mutex_unlock(&mtx_readyRead);
 
+		//read from sock_fd to buf.
 		int n;
 		char buf[READ_BUF];
 		printf("in read. sock = %d\n", arg_ptr->sock_fd);
-		while((n = recv(arg_ptr->sock_fd, buf, 4096, 0)) > 0){
+		while((n = recv(arg_ptr->sock_fd, buf, READ_BUF, 0)) > 0){
 			/* receiving */
 			arg_ptr->call_callback_recv(buf,n);
 //			write(STDOUT_FILENO, buf, n);
 		}
 		if(n < 0){
 			printf("recv error.\n");
-			arg_ptr->call_callback_stat(RECEIVE_ERROR, THREAD_RECEIVE_STOP);
 			pthread_mutex_lock(&mtx_readyRead);
 			isConnect = false;
 			pthread_mutex_unlock(&mtx_readyRead);
+			arg_ptr->call_callback_stat(RECEIVE_ERROR, THREAD_RECEIVE_STOP);
 		}
-	}
+	}//end of while(true)
 	pthread_cleanup_pop(0);
 	return NULL;
 }
@@ -301,6 +360,9 @@ void mg_signal_handle(int sig) {
 }
 
 int MGNet::reconnectNet() {
+
+	this->ActReadThreadCmd(1);
+	return 0;
 	//set isConnect false
 	int rtvl;
 	close(sock_fd);
@@ -375,9 +437,7 @@ string MGNet::get_heart_break_str() {
 
 int MGNet::connectNet() {
 	int rtvl;
-
 	printf("ip = %s\nport = %d\n", remote_ip, remote_port);
-
 	struct sockaddr_in sock_addr;
 	memset(&sock_addr,0,sizeof(sock_addr));
 	sock_addr.sin_family = AF_INET;
@@ -392,11 +452,26 @@ int MGNet::connectNet() {
 		printf("sock_fd = %d\n", sock_fd);
 	}
 
+	/* set socket option */
+	struct timeval timeout = {HEART_TIME_INTERVAL+10,0};
+	rtvl = setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(struct timeval));
+	if(rtvl < 0){
+		printf("setsockopt SO_SNDTIMEO failed.");
+	}
+
 //	rtvl = bind(sock_fd, ailist->ai_addr,ailist->ai_addrlen);
 	rtvl = bind(sock_fd, (sockaddr*)&sock_addr, sizeof(sock_addr));
 	if(rtvl < 0){
 		printf("bind < 0\n");
 		return -2;
+	}
+
+	rtvl = SetNonBlock(sock_fd);
+	if(rtvl < 0){
+		printf("SetNonBlock < 0\n");
+		close(sock_fd);
+		sock_fd = -1;
+		return -1;
 	}
 
 	struct sockaddr_in remote_addr;
@@ -405,21 +480,86 @@ int MGNet::connectNet() {
 	remote_addr.sin_addr.s_addr = inet_addr(remote_ip);
 	remote_addr.sin_port = htons(remote_port);
 
+	pthread_mutex_lock(&mtx_readyRead);
+	isConnect = false;
+	pthread_mutex_unlock(&mtx_readyRead);
+
+	printf("begin connect.\n");
 	rtvl = connect(sock_fd,(sockaddr*)&remote_addr,sizeof(remote_addr));
 	if(rtvl < 0){
-		printf("in connect() < 0\n");
-		pthread_mutex_lock(&mtx_readyRead);
-		isConnect = false;
-		pthread_mutex_unlock(&mtx_readyRead);
-		return -3;
+		printf("in connect() < 0\t");
+		if(errno != EINPROGRESS){
+			printf("errno != EINPROGRESS errno = %d\n", errno);
+			close(sock_fd);
+			sock_fd = -1;
+			return -3;
+		}
+		printf("ing\n");
 	}
 
-	printf("connect() ok\n");
-	pthread_mutex_lock(&mtx_readyRead);
+	if(rtvl == 0){
+		printf("connect() == 0\n");
+		return sock_fd;
+	}
+
+	//poll and wait.
+	struct pollfd _connect_client[1];
+	int _nfd = 1;
+	memset(&_connect_client,0,sizeof(struct pollfd));
+	_connect_client[0].fd = sock_fd;
+	_connect_client[0].events = POLLOUT | POLLIN;
+	int poll_timeout = 5000;	//TODO set timeout.
+	rtvl = ::poll(_connect_client, _nfd, poll_timeout);
+	printf("poll return : %d\n", rtvl);
+	if(rtvl < 0){
+		//error.
+		close(sock_fd);
+		sock_fd = -1;
+		return -911;
+	}else if(rtvl == 0){
+		printf("connect timeout: %d ms\n", poll_timeout);
+		close(sock_fd);
+		sock_fd = -1;
+		return -921;
+	}else{
+		if((_connect_client[0].revents & POLLIN) || (_connect_client[0].revents & POLLOUT)){
+			int error;
+			int len = sizeof(error);
+			int bok = getsockopt(sock_fd, SOL_SOCKET, SO_ERROR, &error, (socklen_t*)&len);
+			if(bok < 0){
+				printf("error getsockopt()\n");
+				close(sock_fd);
+				sock_fd = -1;
+				return -910;
+			}else if(error){
+				printf("error POLL 1, error = %d\n", error);
+				close(sock_fd);
+				sock_fd = -1;
+				return -912;
+			}
+		}else if((_connect_client[0].revents & POLLERR)
+				|| (_connect_client[0].revents & POLLHUP)
+				||(_connect_client[0].revents & POLLNVAL))
+		{
+			printf("error POLL 2\n");
+			close(sock_fd);
+			sock_fd = -1;
+			return -913;
+		}
+	}
+
+	//connect ok!
+	rtvl = SetRestoreBlock(sock_fd);
+	if(rtvl < 0){
+		close(sock_fd);
+		sock_fd = -1;
+		printf("SetRestoreBlock error.\n");
+	}
+	printf("SetRestoreBlock ok.\n");
+/*	pthread_mutex_lock(&mtx_readyRead);
 	isConnect = true;
-//	pthread_cond_signal(&cond_readyRead);
 	pthread_cond_broadcast(&cond_readyRead);
-	pthread_mutex_unlock(&mtx_readyRead);
+	pthread_mutex_unlock(&mtx_readyRead);*/
 
 	return 0;
 }
@@ -442,6 +582,49 @@ void MGNet::set_stat_callback(StateCallback st_callback_func) {
 
 void MGNet::set_recv_callback(ReceiveCallback rc_callback_func) {
 	rc_cb_func = rc_callback_func;
+}
+
+int MGNet::WriteSelect(int fd, double& timeout_sec) {
+	struct pollfd _connect_client[1];
+	int _nfd = 1;
+	memset(&_connect_client,0,sizeof(struct pollfd));
+	_connect_client[0].fd = fd;
+	_connect_client[0].events = POLLOUT;
+
+	return ::poll(_connect_client,_nfd,(int)(timeout_sec*1000));
+}
+
+int SetNonBlock(int fd){
+	int flags = fcntl(fd, F_GETFL, 0);
+	restore_flags = flags;
+	if(flags == -1){
+		return -1;
+	}
+
+	if(fcntl(fd, F_SETFL, flags | O_NONBLOCK | O_NDELAY) == -1)
+		return -1;
+
+	return 0;
+}
+
+int SetRestoreBlock(int fd){
+	int flags = fcntl(fd, F_GETFL, 0);
+	if(flags == -1){
+		return -1;
+	}
+	flags &= ~(O_NONBLOCK|O_NDELAY);
+	if(fcntl(fd, F_SETFL, flags) == -1)
+		return -1;
+
+	return 0;
+}
+
+void MGNet::ActReadThreadCmd(int cmd) {
+	pthread_mutex_lock(&mtx_read_thread);
+	read_thread_cmd = cmd;
+	printf("read_thread_cmd = %d", cmd);
+	pthread_cond_broadcast(&cond_read_thread);
+	pthread_mutex_unlock(&mtx_read_thread);
 }
 
 } /* namespace mango */

@@ -60,11 +60,12 @@ int main() {
 			mNet->stop();
 			break;
 		}else if(0 == input.compare("recon")){
-			mNet->reconnectNet();
+//			mNet->reconnectNet();
+			mNet->ActReadThreadCmd(1);
 			printf("reconnectNet..\n");
 			continue;
 		}else if(0 == input.compare("discon")){
-			mNet->disconnectNet();
+//			mNet->disconnectNet();
 			printf("disconnect..\n");
 			continue;
 		}else{
