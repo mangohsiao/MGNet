@@ -244,6 +244,9 @@ void* thread_write_run(void* arg) {
 			}else{
 				m_list->push_front(p);
 				/* set disConnect? */
+				pthread_mutex_lock(&mtx_readyRead);
+				isConnect = false;
+				pthread_mutex_unlock(&mtx_readyRead);
 				//TODO callback
 				arg_ptr->call_callback_stat(99,98);
 			}
@@ -255,7 +258,7 @@ void* thread_write_run(void* arg) {
 }
 
 void cleanup_read_thread(void *){
-//	printf("cleaning read thread.\n");
+	printf("cleaning read thread.\n");
 	pthread_mutex_unlock(&mtx_readyRead);
 	return;
 }
@@ -308,21 +311,26 @@ void* thread_read_run(void* arg) {
 		pthread_mutex_unlock(&mtx_readyRead);
 
 		//read from sock_fd to buf.
-		int n;
+		int n = -1;
 		char buf[READ_BUF];
 		printf("in read. sock = %d\n", arg_ptr->sock_fd);
-		while((n = recv(arg_ptr->sock_fd, buf, READ_BUF, 0)) > 0){
+		double timeout = 30.0;
+		while(arg_ptr->ReadSelect(arg_ptr->sock_fd, timeout) > 0){
+			n = recv(arg_ptr->sock_fd, buf, READ_BUF, 0);
+			if(n < 0){
+				break;
+			}
 			/* receiving */
 			arg_ptr->call_callback_recv(buf,n);
 //			write(STDOUT_FILENO, buf, n);
 		}
-		if(n < 0){
+//		if(n < 0){
 			printf("recv error.\n");
 			pthread_mutex_lock(&mtx_readyRead);
 			isConnect = false;
 			pthread_mutex_unlock(&mtx_readyRead);
 			arg_ptr->call_callback_stat(RECEIVE_ERROR, THREAD_RECEIVE_STOP);
-		}
+//		}
 	}//end of while(true)
 	pthread_cleanup_pop(0);
 	return NULL;
@@ -339,7 +347,7 @@ void* thread_heart_run(void* arg) {
 	while(true){
 		while(isConnect){
 			if(++arg_ptr->heart_check > 1){
-				arg_ptr->send(heart_str);
+//				arg_ptr->send(heart_str);
 			}
 			sleep(sleep_sec);
 		}
@@ -453,7 +461,7 @@ int MGNet::connectNet() {
 	}
 
 	/* set socket option */
-	struct timeval timeout = {HEART_TIME_INTERVAL+10,0};
+	struct timeval timeout = {HEART_TIME_INTERVAL+20,0};
 	rtvl = setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(struct timeval));
 	if(rtvl < 0){
 		printf("setsockopt SO_SNDTIMEO failed.");
@@ -508,7 +516,7 @@ int MGNet::connectNet() {
 	memset(&_connect_client,0,sizeof(struct pollfd));
 	_connect_client[0].fd = sock_fd;
 	_connect_client[0].events = POLLOUT | POLLIN;
-	int poll_timeout = 5000;	//TODO set timeout.
+	int poll_timeout = 10000;	//TODO set timeout.
 	rtvl = ::poll(_connect_client, _nfd, poll_timeout);
 	printf("poll return : %d\n", rtvl);
 	if(rtvl < 0){
@@ -594,6 +602,43 @@ int MGNet::WriteSelect(int fd, double& timeout_sec) {
 	return ::poll(_connect_client,_nfd,(int)(timeout_sec*1000));
 }
 
+int MGNet::ReadSelect(int fd, double& timeout_sec) {
+	struct pollfd _connect_client[1];
+	int _nfd = 1, rtvl;
+	memset(&_connect_client,0,sizeof(struct pollfd));
+	_connect_client[0].fd = fd;
+	_connect_client[0].events = POLLIN;
+
+	printf("in read\n", timeout_sec);
+	rtvl = ::poll(_connect_client,_nfd,(int)(timeout_sec*1000));
+	if(rtvl < 0){
+			//error.
+			printf("poll < 0\n", timeout_sec);
+		}else if(rtvl == 0){
+			printf("read timeout: %f ms\n", timeout_sec);
+		}else{
+			if((_connect_client[0].revents & POLLIN) || (_connect_client[0].revents & POLLOUT)){
+				int error;
+				int len = sizeof(error);
+				int bok = getsockopt(sock_fd, SOL_SOCKET, SO_ERROR, &error, (socklen_t*)&len);
+				if(bok < 0){
+					printf("error getsockopt()\n");
+					return -910;
+				}else if(error){
+					printf("error POLL 1, error = %d\n", error);
+					return -912;
+				}
+			}else if((_connect_client[0].revents & POLLERR)
+					|| (_connect_client[0].revents & POLLHUP)
+					||(_connect_client[0].revents & POLLNVAL))
+			{
+				printf("error POLL 2\n");
+				return -913;
+			}
+		}
+	printf("end read\n", timeout_sec);
+}
+
 int SetNonBlock(int fd){
 	int flags = fcntl(fd, F_GETFL, 0);
 	restore_flags = flags;
@@ -627,4 +672,9 @@ void MGNet::ActReadThreadCmd(int cmd) {
 	pthread_mutex_unlock(&mtx_read_thread);
 }
 
-} /* namespace mango */
+bool MGNet::checkIsConnect() {
+	return isConnect;
+}
+
+}
+ /* namespace mango */

@@ -63,6 +63,8 @@ public:
 	int WriteSelect(int fd, double& timeout_sec);
 	void ActReadThreadCmd(int cmd);
 	int connectNet();
+	bool checkIsConnect();
+	int ReadSelect(int fd, double& timeout_sec);
 
 	static MGNet* ins(){
 		if(NULL == MGNet::m_MGNet){
